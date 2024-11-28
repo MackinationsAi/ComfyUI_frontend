@@ -53,6 +53,16 @@ var styles = `
     overflow-y: hidden;
     width: 220px;
   }
+  .layer-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+  }
+  
+  .selection-tool {
+    cursor: crosshair;
+  }
   #maskEditor_sidePanelShortcuts {
     display: flex;
     flex-direction: row;
@@ -377,9 +387,9 @@ var styles = `
   #maskEditor_topBarButtonContainer {
     display: flex;
     gap: 10px;
-    margin-right: 0.5rem;
+    margin-left: 0.5rem;
     position: absolute;
-    right: 0;
+    left: 0;
     width: 200px;
   }
   #maskEditor_topBarShortcutsContainer {
@@ -736,7 +746,9 @@ enum Tools {
   Pen = 'pen',
   Eraser = 'eraser',
   PaintBucket = 'paintBucket',
-  ColorSelect = 'colorSelect'
+  ColorSelect = 'colorSelect',
+  BoxSelect = 'boxSelect',
+  LassoSelect = 'lassoSelect'
 }
 
 enum CompositionOperation {
@@ -756,6 +768,30 @@ enum ColorComparisonMethod {
   LAB = 'lab'
 }
 
+enum LayerBlendMode {
+  Normal = 'normal',
+  Multiply = 'multiply',
+  Screen = 'screen',
+  Overlay = 'overlay',
+  SoftLight = 'soft-light',
+  HardLight = 'hard-light',
+  Difference = 'difference',
+  Exclusion = 'exclusion',
+  Hue = 'hue',
+  Saturation = 'saturation',
+  Color = 'color',
+  Luminosity = 'luminosity'
+}
+
+interface Layer {
+  id: string;
+  type: string;
+  visible: boolean;
+  opacity: number;
+  blendMode: LayerBlendMode;
+  data: HTMLCanvasElement;
+}
+
 interface Point {
   x: number
   y: number
@@ -764,6 +800,11 @@ interface Point {
 interface Offset {
   x: number
   y: number
+}
+
+interface SelectionResult {
+  bounds: {x: number, y: number, width: number, height: number} | null;
+  path: Point[] | null;
 }
 
 export interface Brush {
@@ -1904,6 +1945,148 @@ class ColorSelectTool {
   }
 }
 
+class LayerManager {
+  private layers: Layer[] = [];
+  private activeLayer: number = 0;
+  private maskCanvas: HTMLCanvasElement;
+
+  constructor(maskCanvas: HTMLCanvasElement) {
+    this.maskCanvas = maskCanvas;
+  }
+
+  addLayer(layer: Layer) {
+    this.layers.push(layer);
+    this.activeLayer = this.layers.length - 1;
+    this.updateLayerUI();
+  }
+
+  removeLayer(index: number) {
+    if (index >= 0 && index < this.layers.length) {
+      this.layers.splice(index, 1);
+      this.activeLayer = Math.max(0, this.activeLayer - 1);
+      this.updateLayerUI();
+    }
+  }
+
+  setLayerBlendMode(index: number, blendMode: LayerBlendMode) {
+    if (index >= 0 && index < this.layers.length) {
+      this.layers[index].blendMode = blendMode;
+      this.compositeLayersToCanvas();
+    }
+  }
+
+  setLayerOpacity(index: number, opacity: number) {
+    if (index >= 0 && index < this.layers.length) {
+      this.layers[index].opacity = opacity;
+      this.compositeLayersToCanvas();
+    }
+  }
+
+  private compositeLayersToCanvas() {
+    const canvas = document.createElement('canvas');
+    canvas.width = this.maskCanvas.width;
+    canvas.height = this.maskCanvas.height;
+    const ctx = canvas.getContext('2d');
+    
+    if (!ctx) return canvas;
+
+    this.layers.forEach(layer => {
+      if (layer.visible) {
+        ctx.globalCompositeOperation = layer.blendMode as GlobalCompositeOperation;
+        ctx.globalAlpha = layer.opacity;
+        ctx.drawImage(layer.data, 0, 0);
+      }
+    });
+    
+    return canvas;
+  }
+
+  private updateLayerUI() {
+    const layerContainer = document.getElementById('maskEditor_layerContainer');
+    if (!layerContainer) return;
+    
+    // Clear existing layers
+    layerContainer.innerHTML = '';
+    
+    // Create and append layer elements
+    this.layers.forEach((layer, index) => {
+      const layerElement = document.createElement('div');
+      layerElement.classList.add('layer-list-item');
+      
+      // Visibility toggle
+      const visibilityToggle = document.createElement('input');
+      visibilityToggle.type = 'checkbox';
+      visibilityToggle.checked = layer.visible;
+      visibilityToggle.onchange = () => {
+        layer.visible = visibilityToggle.checked;
+        this.compositeLayersToCanvas();
+      };
+      
+      // Layer preview
+      const preview = document.createElement('canvas');
+      preview.width = 40;
+      preview.height = 40;
+      const ctx = preview.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(layer.data, 0, 0, 40, 40);
+      }
+      
+      // Blend mode selector
+      const blendSelect = document.createElement('select');
+      Object.values(LayerBlendMode).forEach(mode => {
+        const option = document.createElement('option');
+        option.value = mode;
+        option.textContent = mode;
+        option.selected = mode === layer.blendMode;
+        blendSelect.appendChild(option);
+      });
+      blendSelect.onchange = () => {
+        layer.blendMode = blendSelect.value as LayerBlendMode;
+        this.compositeLayersToCanvas();
+      };
+      
+      // Opacity slider
+      const opacitySlider = document.createElement('input');
+      opacitySlider.type = 'range';
+      opacitySlider.min = '0';
+      opacitySlider.max = '1';
+      opacitySlider.step = '0.01';
+      opacitySlider.value = layer.opacity.toString();
+      opacitySlider.onchange = () => {
+        layer.opacity = parseFloat(opacitySlider.value);
+        this.compositeLayersToCanvas();
+      };
+      
+      // Add elements to layer row
+      layerElement.appendChild(visibilityToggle);
+      layerElement.appendChild(preview);
+      layerElement.appendChild(blendSelect);
+      layerElement.appendChild(opacitySlider);
+      
+      // Add drag and drop handlers
+      layerElement.draggable = true;
+      layerElement.ondragstart = (e) => {
+        e.dataTransfer!.setData('text/plain', index.toString());
+      };
+      layerElement.ondragover = (e) => {
+        e.preventDefault();
+      };
+      layerElement.ondrop = (e) => {
+        e.preventDefault();
+        const fromIndex = parseInt(e.dataTransfer!.getData('text/plain'));
+        const toIndex = index;
+        // Reorder layers
+        const [layer] = this.layers.splice(fromIndex, 1);
+        this.layers.splice(toIndex, 0, layer);
+        this.updateLayerUI();
+        this.compositeLayersToCanvas();
+      };
+      
+      layerContainer.appendChild(layerElement);
+    });
+  }
+}
+
 class BrushTool {
   brushSettings: Brush //this saves the current brush settings
   maskBlendMode: MaskBlendMode
@@ -2426,6 +2609,189 @@ class BrushTool {
   }
 }
 
+class SelectionTool {
+  protected startPoint: Point | null = null;
+  protected currentPath: Point[] = [];
+  protected selectionCanvas: HTMLCanvasElement;
+  protected selectionCtx: CanvasRenderingContext2D;
+  
+  constructor(private messageBroker: MessageBroker) {
+    this.selectionCanvas = document.createElement('canvas');
+    this.selectionCtx = this.selectionCanvas.getContext('2d')!;
+  }
+
+  protected initializeSelection(canvas: HTMLCanvasElement) {
+    this.selectionCanvas.width = canvas.width;
+    this.selectionCanvas.height = canvas.height;
+    this.selectionCtx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  protected async applySelectionToMask(selectionResult: SelectionResult) {
+    try {
+      const maskCtx = await this.messageBroker.pull('maskCtx');
+      const maskColor = await this.messageBroker.pull('getMaskColor');
+      
+      if (!maskCtx || !maskColor) {
+          console.error('Failed to get required context or color');
+          return;
+      }
+    
+    if (selectionResult.bounds) {
+        // For box selection
+        maskCtx.fillStyle = `rgb(${maskColor.r}, ${maskColor.g}, ${maskColor.b})`;
+        maskCtx.fillRect(
+            selectionResult.bounds.x,
+            selectionResult.bounds.y,
+            selectionResult.bounds.width,
+            selectionResult.bounds.height
+        );
+    } else if (selectionResult.path) {
+        // For lasso selection
+        maskCtx.fillStyle = `rgb(${maskColor.r}, ${maskColor.g}, ${maskColor.b})`;
+        maskCtx.beginPath();
+        maskCtx.moveTo(selectionResult.path[0].x, selectionResult.path[0].y);
+        for (let i = 1; i < selectionResult.path.length; i++) {
+            maskCtx.lineTo(selectionResult.path[i].x, selectionResult.path[i].y);
+        }
+        maskCtx.closePath();
+        maskCtx.fill();
+    }
+    
+    this.messageBroker.publish('saveState');
+
+    } catch (error) {
+      console.error('Error applying selection to mask:', error);
+    }
+  }
+}
+
+class BoxSelectTool extends SelectionTool {
+  startSelection(point: Point) {
+    this.startPoint = point;
+    this.drawSelectionRect(point);
+  }
+
+  updateSelection(point: Point) {
+    if (!this.startPoint) return;
+    this.selectionCtx.clearRect(
+      0,
+      0,
+      this.selectionCanvas.width,
+      this.selectionCanvas.height
+    );
+    this.drawSelectionRect(point);
+  }
+
+  applySelection() {
+    // Apply selection to mask
+    const bounds = this.getSelectionBounds();
+    // Implementation for applying selection
+  }
+
+  private drawSelectionRect(currentPoint: Point) {
+    if (!this.startPoint) return;
+
+    this.selectionCtx.strokeStyle = '#ffffff';
+    this.selectionCtx.shadowColor = '#000000';
+    this.selectionCtx.shadowBlur = 1;
+    this.selectionCtx.lineWidth = 1;
+    this.selectionCtx.setLineDash([5, 5]);
+    
+    const x = Math.min(this.startPoint.x, currentPoint.x);
+    const y = Math.min(this.startPoint.y, currentPoint.y);
+    const width = Math.abs(currentPoint.x - this.startPoint.x);
+    const height = Math.abs(currentPoint.y - this.startPoint.y);
+    
+    this.selectionCtx.strokeRect(x, y, width, height);
+  }
+
+  getSelectionBounds(): { x: number; y: number; width: number; height: number } | null {
+    if (!this.startPoint) return null;
+    return {
+      x: this.startPoint.x,
+      y: this.startPoint.y,
+      width: this.selectionCanvas.width,
+      height: this.selectionCanvas.height
+    };
+  }
+}
+
+class LassoSelectTool extends SelectionTool {
+  startSelection(point: Point) {
+    this.currentPath = [point];
+    this.drawLassoPath();
+  }
+
+  updateSelection(point: Point) {
+    this.currentPath.push(point);
+    this.drawLassoPath();
+  }
+
+  applySelection() {
+    // Apply selection to mask
+    const bounds = this.getSelectionBounds();
+    // Implementation for applying selection
+  }
+
+  private drawLassoPath() {
+    this.selectionCtx.clearRect(
+      0,
+      0,
+      this.selectionCanvas.width,
+      this.selectionCanvas.height
+    );
+    
+    if (this.currentPath.length < 2) return;
+    
+    this.selectionCtx.beginPath();
+    this.selectionCtx.strokeStyle = '#ffffff';
+    this.selectionCtx.lineWidth = 1;
+    this.selectionCtx.setLineDash([5, 5]);
+    
+    this.selectionCtx.moveTo(this.currentPath[0].x, this.currentPath[0].y);
+    
+    for (let i = 1; i < this.currentPath.length; i++) {
+      this.selectionCtx.lineTo(this.currentPath[i].x, this.currentPath[i].y);
+    }
+    
+    this.selectionCtx.stroke();
+  }
+
+  completeSelection() {
+    if (this.currentPath.length > 2) {
+      this.selectionCtx.closePath();
+      this.selectionCtx.stroke();
+    }
+  }
+
+  getSelectionPath(): Point[] {
+    return [...this.currentPath];
+  }
+
+  getSelectionBounds(): { x: number; y: number; width: number; height: number } | null {
+    if (this.currentPath.length === 0) return null;
+    
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    
+    this.currentPath.forEach(point => {
+      minX = Math.min(minX, point.x);
+      minY = Math.min(minY, point.y);
+      maxX = Math.max(maxX, point.x);
+      maxY = Math.max(maxY, point.y);
+    });
+    
+    return {
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY
+    };
+  }
+}
+
 class UIManager {
   private rootElement: HTMLElement
   private brush!: HTMLDivElement
@@ -2452,6 +2818,8 @@ class UIManager {
   private imageURL!: URL
   private darkMode: boolean = true
 
+  private layerManager: LayerManager
+
   private maskEditor: MaskEditorDialog
   private messageBroker: MessageBroker
 
@@ -2461,12 +2829,54 @@ class UIManager {
   private zoomTextHTML!: HTMLSpanElement
   private dimensionsTextHTML!: HTMLSpanElement
 
+
+  private updateToolSelection(toolElements: HTMLElement[], selectedTool: HTMLElement) {
+    for (let toolElement of toolElements) {
+        if (toolElement !== selectedTool) {
+            toolElement.classList.remove('maskEditor_toolPanelContainerSelected');
+        } else {
+            toolElement.classList.add('maskEditor_toolPanelContainerSelected');
+        }
+    }
+    
+    // Update UI visibility based on tool
+    this.brushSettingsHTML.style.display = 'none';
+    this.colorSelectSettingsHTML.style.display = 'none';
+    this.paintBucketSettingsHTML.style.display = 'none';
+    
+    // Update cursor style
+    this.pointerZone.style.cursor = 'crosshair';
+    this.brush.style.opacity = '0';
+  }
+
   constructor(rootElement: HTMLElement, maskEditor: MaskEditorDialog) {
-    this.rootElement = rootElement
-    this.maskEditor = maskEditor
-    this.messageBroker = maskEditor.getMessageBroker()
-    this.addListeners()
-    this.addPullTopics()
+    this.rootElement = rootElement;
+    this.maskEditor = maskEditor;
+    this.messageBroker = maskEditor.getMessageBroker();
+    this.addListeners();
+    this.addPullTopics();
+  }
+
+  private createLayerListItem(layer: Layer) {
+    const container = document.createElement('div');
+    container.classList.add('layer-list-item');
+    
+    const visibilityToggle = document.createElement('input');
+    visibilityToggle.type = 'checkbox';
+    visibilityToggle.checked = layer.visible;
+    
+    const blendModeSelect = document.createElement('select');
+    Object.values(LayerBlendMode).forEach(mode => {
+      const option = document.createElement('option');
+      option.value = mode;
+      option.text = mode;
+      blendModeSelect.add(option);
+    });
+    
+    // Add drag-drop reordering
+    container.setAttribute('draggable', 'true');
+    
+    return container;
   }
 
   addListeners() {
@@ -2507,6 +2917,7 @@ class UIManager {
     this.messageBroker.createPullTopic('maskCtx', async () => this.maskCtx)
     this.messageBroker.createPullTopic('imageCtx', async () => this.imageCtx)
     this.messageBroker.createPullTopic('imgCanvas', async () => this.imgCanvas)
+    this.messageBroker.createPullTopic('getPointerZone', async () => this.pointerZone)
     this.messageBroker.createPullTopic(
       'screenToCanvas',
       async (coords: Point) => this.screenToCanvas(coords)
@@ -2518,6 +2929,58 @@ class UIManager {
     this.messageBroker.createPullTopic('getMaskColor', async () =>
       this.getMaskColor()
     )
+  }
+
+  async addNewLayer() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    
+    input.onchange = async (e: Event) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = this.maskCanvas.width;
+          canvas.height = this.maskCanvas.height;
+          const ctx = canvas.getContext('2d')!;
+          
+          // Draw the image maintaining aspect ratio
+          const scale = Math.min(
+            canvas.width / img.width,
+            canvas.height / img.height
+          );
+          const x = (canvas.width - img.width * scale) / 2;
+          const y = (canvas.height - img.height * scale) / 2;
+          
+          ctx.drawImage(
+            img,
+            x,
+            y,
+            img.width * scale,
+            img.height * scale
+          );
+
+          const newLayer: Layer = {
+            id: crypto.randomUUID(),
+            type: 'image',
+            visible: true,
+            opacity: 1,
+            blendMode: LayerBlendMode.Normal,
+            data: canvas
+          };
+
+          this.layerManager.addLayer(newLayer);
+          };
+        img.src = e.target?.result as string;
+        };
+      reader.readAsDataURL(file);
+      };
+    input.click();
   }
 
   async setlayout() {
@@ -2629,7 +3092,7 @@ class UIManager {
   async initUI() {
     this.saveButton.innerText = 'Save'
     this.saveButton.disabled = false
-
+    this.layerManager = new LayerManager(this.maskCanvas);
     await this.setImages(this.imgCanvas) //probably change method to initImageCanvas
   }
 
@@ -2660,6 +3123,28 @@ class UIManager {
     side_panel.appendChild(image_layer_settings)
 
     return side_panel
+  }
+
+  private async createLayerControls() {
+    const container = document.createElement('div');
+    container.classList.add('layer-controls');
+  
+    const addLayerButton = document.createElement('button');
+    addLayerButton.textContent = 'Add Layer';
+    addLayerButton.onclick = () => this.addNewLayer();
+  
+    const layerBlendMode = document.createElement('select');
+    Object.values(LayerBlendMode).forEach(mode => {
+      const option = document.createElement('option');
+      option.value = mode;
+      option.textContent = mode;
+      layerBlendMode.appendChild(option);
+    });
+  
+    container.appendChild(addLayerButton);
+    container.appendChild(layerBlendMode);
+    
+    return container;
   }
 
   private async createBrushSettings() {
@@ -3165,6 +3650,11 @@ class UIManager {
 
     var top_bar_shortcuts_container = document.createElement('div')
     top_bar_shortcuts_container.id = 'maskEditor_topBarShortcutsContainer'
+    top_bar_shortcuts_container.style.position = 'absolute'
+    top_bar_shortcuts_container.style.right = '0'
+    top_bar_shortcuts_container.style.display = 'flex'
+    top_bar_shortcuts_container.style.gap = '10px'
+    top_bar_shortcuts_container.style.marginRight = '10px'
 
     var top_bar_undo_button = document.createElement('div')
     top_bar_undo_button.id = 'maskEditor_topBarUndoButton'
@@ -3410,6 +3900,76 @@ class UIManager {
       toolPanel_colorSelectToolIndicator
     )
 
+    //box select tool
+    var toolPanel_boxSelectToolContainer = document.createElement('div')
+    toolPanel_boxSelectToolContainer.classList.add('maskEditor_toolPanelContainer')
+    toolPanel_boxSelectToolContainer.classList.add(toolPanelHoverAccent)
+    toolPanel_boxSelectToolContainer.innerHTML = `
+      <svg viewBox="0 0 44 44">
+        <path class="cls-1" d="M10,10v24h24V10H10z M32,32H12V12h20V32z"/>
+      </svg>
+    `
+    toolElements.push(toolPanel_boxSelectToolContainer)
+
+    toolPanel_boxSelectToolContainer.addEventListener('click', () => {
+      this.messageBroker.publish('setTool', Tools.BoxSelect)
+      for (let toolElement of toolElements) {
+        if (toolElement != toolPanel_boxSelectToolContainer) {
+          toolElement.classList.remove('maskEditor_toolPanelContainerSelected')
+        } else {
+          toolElement.classList.add('maskEditor_toolPanelContainerSelected')
+          this.brushSettingsHTML.style.display = 'none'
+          this.colorSelectSettingsHTML.style.display = 'none'
+          this.paintBucketSettingsHTML.style.display = 'none'
+        }
+      }
+      this.pointerZone.style.cursor = "url('/cursor/boxSelect.png') 15 15, crosshair"
+      this.brush.style.opacity = '0'
+    })
+
+    var toolPanel_boxSelectToolIndicator = document.createElement('div')
+    toolPanel_boxSelectToolIndicator.classList.add('maskEditor_toolPanelIndicator')
+    toolPanel_boxSelectToolContainer.appendChild(toolPanel_boxSelectToolIndicator)
+    toolPanel_boxSelectToolContainer.addEventListener('click', () => {
+      this.messageBroker.publish('setTool', Tools.BoxSelect);
+      this.updateToolSelection(toolElements, toolPanel_boxSelectToolContainer);
+    });
+    
+    //lasso select tool
+    var toolPanel_lassoSelectToolContainer = document.createElement('div')
+    toolPanel_lassoSelectToolContainer.classList.add('maskEditor_toolPanelContainer')
+    toolPanel_lassoSelectToolContainer.classList.add(toolPanelHoverAccent)
+    toolPanel_lassoSelectToolContainer.innerHTML = `
+      <svg viewBox="0 0 44 44">
+        <path class="cls-1" d="M32.4,16.8c-1.5-5.6-7.3-8.9-12.9-7.4s-8.9,7.3-7.4,12.9c0.9,3.3,3.3,5.9,6.5,7.1c0.8,0.3,1.6,0.5,2.4,0.6l1.7,6.3c0.2,0.8,1,1.2,1.8,1c0.8-0.2,1.2-1,1-1.8l-1.7-6.3c2.3-0.8,4.2-2.4,5.3-4.6C31.5,21.9,33.1,19.5,32.4,16.8z"/>
+      </svg>
+    `
+    toolElements.push(toolPanel_lassoSelectToolContainer)
+
+    toolPanel_lassoSelectToolContainer.addEventListener('click', () => {
+      this.messageBroker.publish('setTool', Tools.LassoSelect)
+      for (let toolElement of toolElements) {
+        if (toolElement != toolPanel_lassoSelectToolContainer) {
+          toolElement.classList.remove('maskEditor_toolPanelContainerSelected')
+        } else {
+          toolElement.classList.add('maskEditor_toolPanelContainerSelected')
+          this.brushSettingsHTML.style.display = 'none'
+          this.colorSelectSettingsHTML.style.display = 'none'
+          this.paintBucketSettingsHTML.style.display = 'none'
+        }
+      }
+      this.pointerZone.style.cursor = "url('/cursor/lassoSelect.png') 15 15, crosshair"
+      this.brush.style.opacity = '0'
+    })
+
+    var toolPanel_lassoSelectToolIndicator = document.createElement('div')
+    toolPanel_lassoSelectToolIndicator.classList.add('maskEditor_toolPanelIndicator')
+    toolPanel_lassoSelectToolContainer.appendChild(toolPanel_lassoSelectToolIndicator)
+    toolPanel_lassoSelectToolContainer.addEventListener('click', () => {
+      this.messageBroker.publish('setTool', Tools.LassoSelect);
+      this.updateToolSelection(toolElements, toolPanel_lassoSelectToolContainer);
+    });
+
     //zoom indicator
     var toolPanel_zoomIndicator = document.createElement('div')
     toolPanel_zoomIndicator.classList.add('maskEditor_toolPanelZoomIndicator')
@@ -3436,6 +3996,8 @@ class UIManager {
     tool_panel.appendChild(toolPanel_eraserToolContainer)
     tool_panel.appendChild(toolPanel_paintBucketToolContainer)
     tool_panel.appendChild(toolPanel_colorSelectToolContainer)
+    tool_panel.appendChild(toolPanel_boxSelectToolContainer)
+    tool_panel.appendChild(toolPanel_lassoSelectToolContainer)
     tool_panel.appendChild(toolPanel_zoomIndicator)
 
     return tool_panel
@@ -3823,16 +4385,20 @@ class UIManager {
   async updateCursor() {
     const currentTool = await this.messageBroker.pull('currentTool')
     if (currentTool === Tools.PaintBucket) {
-      this.pointerZone.style.cursor =
-        "url('/cursor/paintBucket.png') 30 25, auto"
-      this.setBrushOpacity(0)
+        this.pointerZone.style.cursor = "url('/cursor/paintBucket.png') 30 25, auto"
+        this.setBrushOpacity(0)
     } else if (currentTool === Tools.ColorSelect) {
-      this.pointerZone.style.cursor =
-        "url('/cursor/colorSelect.png') 15 25, auto"
-      this.setBrushOpacity(0)
+        this.pointerZone.style.cursor = "url('/cursor/colorSelect.png') 15 25, auto"
+        this.setBrushOpacity(0)
+    } else if (currentTool === Tools.BoxSelect) {
+        this.pointerZone.style.cursor = "url('/cursor/boxSelect.png') 15 15, crosshair"
+        this.setBrushOpacity(0)
+    } else if (currentTool === Tools.LassoSelect) {
+        this.pointerZone.style.cursor = "url('/cursor/lassoSelect.png') 15 15, crosshair"
+        this.setBrushOpacity(0)
     } else {
-      this.pointerZone.style.cursor = 'none'
-      this.setBrushOpacity(1)
+        this.pointerZone.style.cursor = 'none'
+        this.setBrushOpacity(1)
     }
 
     this.updateBrushPreview()
@@ -3856,13 +4422,21 @@ class ToolManager {
   currentTool: Tools = Tools.Pen
   isAdjustingBrush: boolean = false // is user adjusting brush size or hardness with alt + right mouse button
 
+  private pointerZone: HTMLElement;
+  private boxSelectTool: BoxSelectTool;
+  private lassoSelectTool: LassoSelectTool;
+
   constructor(maskEditor: MaskEditorDialog) {
     this.maskEditor = maskEditor
     this.messageBroker = maskEditor.getMessageBroker()
     this.addListeners()
     this.addPullTopics()
+    this.boxSelectTool = new BoxSelectTool(this.messageBroker)
+    this.lassoSelectTool = new LassoSelectTool(this.messageBroker)
+    this.messageBroker.createPullTopic('getPointerZone', async () => document.getElementById('maskEditor_pointerZone'))
+    this.initializePointerZone()
   }
-
+  
   private addListeners() {
     this.messageBroker.subscribe('setTool', async (tool: Tools) => {
       this.setTool(tool)
@@ -3891,13 +4465,31 @@ class ToolManager {
     )
   }
 
+  private async initializePointerZone() {
+    const element = await this.messageBroker.pull('getPointerZone');
+    if (element) {
+        this.pointerZone = element;
+    } else {
+        console.error('Could not find pointer zone element');
+    }
+  }
+
   //tools
 
   setTool(tool: Tools) {
-    this.currentTool = tool
+    this.currentTool = tool;
 
     if (tool != Tools.ColorSelect) {
-      this.messageBroker.publish('clearLastPoint')
+        this.messageBroker.publish('clearLastPoint');
+    }
+
+    // Add this new condition
+    if (this.currentTool === Tools.BoxSelect) {
+        this.pointerZone.style.cursor = "url('/cursor/boxSelect.png') 15 15, crosshair";
+        this.messageBroker.publish('setBrushVisibility', false);
+    } else if (this.currentTool === Tools.LassoSelect) {
+        this.pointerZone.style.cursor = "url('/cursor/lassoSelect.png') 15 15, crosshair";
+        this.messageBroker.publish('setBrushVisibility', false);
     }
   }
 
@@ -3953,6 +4545,18 @@ class ToolManager {
       this.messageBroker.publish('drawStart', event)
       return
     }
+
+    if (this.currentTool === Tools.BoxSelect) {
+      const coords = { x: event.offsetX, y: event.offsetY };
+      const canvasCoords = await this.messageBroker.pull('screenToCanvas', coords);
+      this.boxSelectTool.startSelection(canvasCoords);
+    }
+    
+    if (this.currentTool === Tools.LassoSelect) {
+      const coords = { x: event.offsetX, y: event.offsetY };
+      const canvasCoords = await this.messageBroker.pull('screenToCanvas', coords);
+      this.lassoSelectTool.startSelection(canvasCoords);
+    }
   }
 
   private async handlePointerMove(event: PointerEvent) {
@@ -3991,6 +4595,18 @@ class ToolManager {
       this.messageBroker.publish('draw', event)
       return
     }
+    //box & lasso selection
+    if (this.currentTool === Tools.BoxSelect && event.buttons === 1) {
+      const coords = { x: event.offsetX, y: event.offsetY };
+      const canvasCoords = await this.messageBroker.pull('screenToCanvas', coords);
+      this.boxSelectTool.updateSelection(canvasCoords);
+    }
+    
+    if (this.currentTool === Tools.LassoSelect && event.buttons === 1) {
+      const coords = { x: event.offsetX, y: event.offsetY };
+      const canvasCoords = await this.messageBroker.pull('screenToCanvas', coords);
+      this.lassoSelectTool.updateSelection(canvasCoords);
+    }
   }
 
   private handlePointerUp(event: PointerEvent) {
@@ -4000,6 +4616,9 @@ class ToolManager {
     this.isAdjustingBrush = false
     this.messageBroker.publish('drawEnd', event)
     this.mouseDownPoint = null
+    if (this.currentTool === Tools.LassoSelect) {
+      this.lassoSelectTool.completeSelection();
+    }
   }
 
   private handleWheelEvent(event: WheelEvent) {
